@@ -255,7 +255,7 @@ def train(
        rngs=init_rng)
   logging.info("type of params: %s", type(params))
   #logging.info(params)
-  
+
   # Create optimizer.
   lr_fn = lr_schedules.get_learning_rate_fn(config)
   optimizer_config = optimizers.get_optax_optimizer_config(config)
@@ -263,7 +263,8 @@ def train(
   #   optimizers.get_optimizer(config.optimizer_configs, lr_fn)
   tx = optimizers.get_optimizer(optimizer_config, lr_fn, params=params)
   # https://github.com/google-deepmind/optax/issues/320
-  tx = optax.MultiSteps(tx, every_k_schedule=8)
+  every_k_schedule = config.get('every_k_schedule') or 8
+  tx = optax.MultiSteps(tx, every_k_schedule=every_k_schedule)
   logging.info(tx)
   # We jit this, such that the arrays that are created on the same device as the
   # input is, in this case the CPU. Else they'd be on device[0].
@@ -292,12 +293,16 @@ def train(
 
     checkpoint_dir = config.pretrain_checkpoint.get('checkpoint_path')
     logging.info('restored model from pretrain checkpoint at %s.', checkpoint_dir)
-    """
+    
     ckpt_dict  = checkpoints.restore_checkpoint(checkpoint_dir, target=None)    
-    params_pretrain = ckpt_dict['optimizer']["target"]
+    if ('params' in ckpt_dict):
+      params_pretrain = ckpt_dict['params']
+    elif ('optimizer' in ckpt_dict):
+      params_pretrain = ckpt_dict['optimizer']["target"]
     params_pretrain = freeze(params_pretrain)
     #params_pretrain['SpatialTransformer']['posembed_input']['pos_embedding'] = params_pretrain['SpatialTransformer']['posembed_input']['pos_embedding'][:, 1:, :]
     #params_pretrain['TemporalTransformer']['posembed_input']['pos_embedding'] = params_pretrain['TemporalTransformer']['posembed_input']['pos_embedding'][:, 1:, :]
+    
     train_state = train_state.replace(params=params_pretrain)
     """
     restored_model_cfg = config.get('model')
@@ -306,6 +311,7 @@ def train(
     train_state = model.init_from_train_state(train_state, restored_train_state,
                                               restored_model_cfg)
     del restored_train_state
+    """
   elif (start_step == 0  # Which means "no" checkpoint is restored!
       and config.get('init_from') is not None):
     restored_model_cfg = config.init_from.get('model_config')
