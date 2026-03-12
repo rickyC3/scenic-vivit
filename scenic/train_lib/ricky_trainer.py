@@ -15,6 +15,7 @@
 """Training Script."""
 
 import functools
+import copy
 from typing import Any, Callable, Dict, Tuple, Optional, Type
 
 from absl import logging
@@ -354,8 +355,9 @@ def train(
   # Calculate the total number of training steps.
   total_steps, steps_per_epoch = train_utils.get_num_training_steps(
       config, dataset.meta_data)
+  has_devices = jax.device_count() != 0
 
-  if jax.device_count() == 0:
+  if not has_devices:
       train_step_pmapped = jax.jit(functools.partial(
             train_step,
             flax_model=model.flax_model,
@@ -378,26 +380,22 @@ def train(
         # We can donate both buffers of train_state and train_batch.
         donate_argnums=(0, 1),)
 
-  if jax.device_count() == 0:
-      eval_step_pmapped = jax.jit(functools.partial(
-        eval_step, # diff
+  def build_eval_step(metrics_split):
+    eval_step_fn = functools.partial(
+        eval_step,
         flax_model=model.flax_model,
-        metrics_fn=model.get_metrics_fn('validation'),
-        #return_logits_and_labels=is_multilabel_model, # diff
-        #return_confusion_matrix=get_confusion_matrix, # diff
-        debug=config.debug_eval))
-  else:
-      eval_step_pmapped = jax.pmap(
-        functools.partial(
-            eval_step, # diff
-            flax_model=model.flax_model,
-            metrics_fn=model.get_metrics_fn('validation'),
-            #return_logits_and_labels=is_multilabel_model, # diff
-            #return_confusion_matrix=get_confusion_matrix, # diff
-            debug=config.debug_eval),
+        metrics_fn=model.get_metrics_fn(metrics_split),
+        debug=config.debug_eval)
+    if not has_devices:
+      return jax.jit(eval_step_fn)
+    return jax.pmap(
+        eval_step_fn,
         axis_name='batch',
         # We can donate the eval_batch's buffer.
         donate_argnums=(1,),)
+
+  eval_step_pmapped = build_eval_step('validation')
+  test_eval_step_pmapped = build_eval_step('test')
 
   log_eval_steps = config.get('log_eval_steps') or steps_per_epoch
   if not log_eval_steps:
@@ -411,6 +409,11 @@ def train(
   total_eval_steps = int(
       np.ceil(dataset.meta_data['num_eval_examples'] / eval_batch_size))
   steps_per_eval = config.get('steps_per_eval') or total_eval_steps
+  num_test_examples = dataset.meta_data.get('num_test_examples', 0)
+  steps_per_test = 0
+  if num_test_examples:
+    total_test_steps = int(np.ceil(num_test_examples / eval_batch_size))
+    steps_per_test = config.get('steps_per_test') or total_test_steps
 
   train_metrics, extra_training_logs = [], []
   train_summary, eval_summary = None, None
@@ -441,6 +444,16 @@ def train(
     writer.write_scalars(1, step0_log)
 
   write_note(f'First step compilations...\n{chrono.note}')
+
+  def run_eval(eval_iter, num_steps, eval_fn, split):
+    eval_metrics = []
+    for _ in range(num_steps):
+      eval_batch = next(eval_iter)
+      e_metrics, _ = eval_fn(train_state, eval_batch)
+      eval_metrics.append(train_utils.unreplicate_and_get(e_metrics))
+    return train_utils.log_eval_summary(
+        step=step, eval_metrics=eval_metrics, writer=writer, prefix=split)
+
   for step in range(start_step + 1, total_steps + 1):
     with jax.profiler.StepTraceAnnotation('train', step_num=step):
       train_batch = next(dataset.train_iter)
@@ -485,17 +498,17 @@ def train(
     if (step % log_eval_steps == 1) or (step == total_steps):
       chrono.pause(wait_for=(train_state.params))
       with report_progress.timed('eval'):
-        eval_metrics = []
         # Sync model state across replicas.
         train_state = train_utils.sync_model_state_across_replicas(train_state)
-        for _ in range(steps_per_eval):
-          eval_batch = next(dataset.valid_iter)
-          e_metrics, _ = eval_step_pmapped(train_state, eval_batch)
-          eval_metrics.append(train_utils.unreplicate_and_get(e_metrics))
-        eval_summary = train_utils.log_eval_summary(
-            step=step, eval_metrics=eval_metrics, writer=writer)
+        eval_summary = run_eval(
+            dataset.valid_iter, steps_per_eval, eval_step_pmapped, 'valid')
+        if steps_per_test and hasattr(dataset, 'test_iter'):
+          run_eval(
+              dataset.test_iter,
+              steps_per_test,
+              test_eval_step_pmapped,
+              'test')
       writer.flush()
-      del eval_metrics
       chrono.resume()
     ##################### CHECKPOINTING ###################
     if ((step % checkpoint_steps == 1 and step > 1) or
