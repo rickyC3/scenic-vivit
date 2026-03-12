@@ -71,5 +71,7 @@ if __name__ == '__main__':
 export PYTHONPATH=/users/undergraduate/rjchen25/scenic-vivit/scenic:$PYTHONPATH
 python scenic/main.py \
   --config="/users/undergraduate/rjchen25/scenic-vivit/scenic/projects/vivit/configs/kinetics400/my_config.py" \
-  --workdir=/users/undergraduate/rjchen25/scenic-vivit/train/train_0301_3 > /users/undergraduate/rjchen25/scenic-vivit/record/train_0301_3.log 2>&1
+  --workdir=/users/undergraduate/rjchen25/scenic-vivit/train/train_0302_1 > /users/undergraduate/rjchen25/scenic-vivit/record/train_0302_1.log 2>&1
+
+python scenic/main.py   --config=/users/undergraduate/rjchen25/scenic-vivit/train/train_0304_1/my_config.py --workdir=/users/undergraduate/rjchen25/scenic-vivit/train/train_0304_1 > /users/undergraduate/rjchen25/scenic-vivit/record/train_0304_1.log 2>&1
 """
