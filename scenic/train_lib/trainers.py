@@ -16,12 +16,14 @@
 
 from scenic.train_lib import classification_trainer
 from scenic.train_lib import ricky_trainer
+from scenic.train_lib import ricky_trainer_v2
 from scenic.train_lib.transfer import transfer_trainer
 
 ALL_TRAINERS = {
     'classification_trainer': classification_trainer.train,
     'ricky_trainer': ricky_trainer.train,
     'transfer_trainer': transfer_trainer.train,
+    'ricky_trainer_v2': ricky_trainer_v2.train,
 }
 
 

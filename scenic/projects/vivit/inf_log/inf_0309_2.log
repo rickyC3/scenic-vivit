@@ -1,0 +1,24 @@
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+W0000 00:00:1773157659.359949  909094 gpu_device.cc:2431] TensorFlow was not built with CUDA kernel binaries compatible with compute capability 12.0. CUDA kernels will be jit-compiled from PTX, which could take 30 minutes or longer.
+I0310 23:47:39.361544 140024211535040 run_inference_batch_v3.py:71] ✅ 成功加載 400 個標籤映射
+I0310 23:47:39.361752 140024211535040 run_inference_batch_v3.py:122] 
+📋 標籤映射樣本 (前 10 個):
+I0310 23:47:39.361817 140024211535040 run_inference_batch_v3.py:125]    0: abseiling
+I0310 23:47:39.361863 140024211535040 run_inference_batch_v3.py:125]    1: air drumming
+I0310 23:47:39.361910 140024211535040 run_inference_batch_v3.py:125]    2: answering questions
+I0310 23:47:39.361949 140024211535040 run_inference_batch_v3.py:125]    3: applauding
+I0310 23:47:39.361986 140024211535040 run_inference_batch_v3.py:125]    4: applying cream
+I0310 23:47:39.362032 140024211535040 run_inference_batch_v3.py:125]    5: archery
+I0310 23:47:39.362094 140024211535040 run_inference_batch_v3.py:125]    6: arm wrestling
+I0310 23:47:39.362132 140024211535040 run_inference_batch_v3.py:125]    7: arranging flowers
+I0310 23:47:39.362164 140024211535040 run_inference_batch_v3.py:125]    8: assembling computer
+I0310 23:47:39.362195 140024211535040 run_inference_batch_v3.py:125]    9: auctioning
+I0310 23:47:40.933410 140024211535040 run_inference_batch_v3.py:463] ✅ 加載 19796 個視頻標籤
+I0310 23:47:40.934687 140024211535040 checkpoints.py:1108] Restoring legacy Flax checkpoint from /users/undergraduate/rjchen25/scenic-vivit/train/train_0301_5/checkpoint_114001
+I0310 23:47:53.241674 140024211535040 run_inference_batch_v3.py:267] dict_keys(['opt_state', 'params', 'global_step', 'model_state', 'rng', 'metadata'])
+I0310 23:47:53.243659 140024211535040 run_inference_batch_v3.py:379] ✅ Get params and model state from checkpoint successfully.
+推理進度:   0%|          | 0/19796 [00:00<?, ?it/s]I0310 23:47:57.126059 140004911200000 xla_bridge.py:841] Unable to initialize backend 'tpu': INTERNAL: Failed to open libtpu.so: libtpu.so: cannot open shared object file: No such file or directory
+I0310 23:47:59.122693 140004911200000 model.py:129] Using central frame initializer for input embedding
+I0310 23:47:59.231971 140004634375936 model.py:129] Using central frame initializer for input embedding
+I0310 23:47:59.248977 140004927985408 model.py:129] Using central frame initializer for input embedding
+I0310 23:47:59.262630 140005410330368 model.py:129] Using central frame initializer for input embedding

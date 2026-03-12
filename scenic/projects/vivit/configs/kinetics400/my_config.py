@@ -165,6 +165,7 @@ def get_config(runlocal=''):
   config.num_training_epochs = 80
   #config.batch_size = 64
   config.batch_size = 2
+  config.every_k_schedule = 32
   config.rng_seed = 0
 
   # Use ImageNet-21k-initialized model.
@@ -184,7 +185,7 @@ def get_config(runlocal=''):
 
   # Learning rate.
   accumulation_steps = 8
-  steps_per_epoch = UCF101_TRAIN_SIZE // config.batch_size
+  steps_per_epoch = UCF101_TRAIN_SIZE // (config.batch_size * accumulation_steps)
   #total_steps = config.num_training_epochs * steps_per_epoch
   total_micro_steps = config.num_training_epochs * steps_per_epoch
   config.lr_configs = ml_collections.ConfigDict()

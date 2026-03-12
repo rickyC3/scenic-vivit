@@ -549,7 +549,7 @@ def main(argv):
   stats.print_summary()
 
   if FLAGS.save_predictions:
-    save_results_to_csv(results, str(output_dir / "predictions_0304.csv"))
+    save_results_to_csv(results, str(output_dir / "predictions_0310.csv"))
 
   logger.info(f"✅ 推理完成！結果保存在: {output_dir}")
 
@@ -567,5 +567,5 @@ python run_inference_batch_v3.py \
   --num_frames=32 \
   --frame_size=224 \
   --num_workers=4 \
-  --extract_backend=ffmpeg > inf_0304.log 2>&1
+  --extract_backend=ffmpeg > inf_0309.log 2>&1
 """
