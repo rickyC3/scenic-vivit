@@ -51,7 +51,7 @@ LossFn = Callable[[jnp.ndarray, Batch, Optional[jnp.ndarray]], float]
 LrFn = Callable[[jnp.ndarray], jnp.ndarray]
 
 flax.config.update('flax_use_orbax_checkpointing', False)
-
+use_pmap = False
 
 def train_step(
     train_state: train_utils.TrainState,
@@ -109,7 +109,7 @@ def train_step(
         rng=mixup_rng)
 
   # Bind the rng to the host/device we are on.
-  if (use_pamp):
+  if (use_pmap):
     dropout_rng = train_utils.bind_rng_to_host_device(
         rng, axis_name='batch', bind_to='device')
   else:
@@ -117,6 +117,12 @@ def train_step(
 
   def training_loss_fn(params):
     variables = {'params': params, **train_state.model_state}
+    logging.info("batch keys: %s", batch.keys())
+    logging.info("batch[inputs] shape: %s", batch['inputs'].shape)
+    logging.info("batch[label] shape: %s", batch['label'].shape)
+    # if (not use_pmap):
+    #   batch['inputs'] = batch['inputs'][0]
+
     logits, new_model_state = flax_model.apply(
         variables,
         batch['inputs'],
@@ -124,6 +130,9 @@ def train_step(
         train=True,
         rngs={'dropout': dropout_rng},
         debug=debug)
+    
+    # if (not use_pmap):
+    #   logits = logits[None...]
     loss = loss_fn(logits, batch, variables['params'])
     return loss, (new_model_state, logits)
 
@@ -133,7 +142,7 @@ def train_step(
 
   del train_cost
   # Re-use same axis_name as in the call to `pmap(...train_step...)` below.
-  if (use_pamp):
+  if (use_pmap):
     grad = jax.lax.pmean(grad, axis_name='batch')
   else:
     grad = grad
@@ -254,7 +263,10 @@ def train(
   # Build the loss_fn, metrics, and flax_model.
   model = model_cls(config, dataset.meta_data)
   
-  use_pamp = if(jax.device_count() > 1, True, False)
+  if (jax.device_count() > 1):
+    use_pmap = True
+  else:
+    use_pmap = False
 
   # -------------- QAT rule setting ----------------
   if (config.get('quantization', False) and config.quantization.QT_type == "QAT"):
@@ -376,7 +388,7 @@ def train(
   
 
   # Replicate the optimizer, state, and rng.
-  if (use_pamp):
+  if (use_pmap):
     train_state = jax_utils.replicate(train_state)
   else:
     logging.info('Only one device is detected. Running in non-pmap mode, which means no data parallelism and no cross-replica communication. This is useful for debugging, but for actual training, please use more than 1 device. ')
@@ -386,7 +398,7 @@ def train(
   total_steps, steps_per_epoch = train_utils.get_num_training_steps(
       config, dataset.meta_data)
 
-  if not use_pamp:
+  if not use_pmap:
       train_step_pmapped = jax.jit(
         functools.partial(
             train_step,                        # diff
@@ -412,7 +424,7 @@ def train(
         # We can donate both buffers of train_state and train_batch.
         donate_argnums=(0, 1),)
 
-  if not use_pamp:
+  if not use_pmap:
       eval_step_pmapped = jax.jit(
         functools.partial(
             eval_step, # diff
@@ -481,6 +493,10 @@ def train(
   for step in range(start_step + 1, total_steps + 1):
     with jax.profiler.StepTraceAnnotation('train', step_num=step):
       train_batch = next(dataset.train_iter)
+
+      if not use_pmap:
+        train_batch = jax.tree_util.tree_map(lambda x: x[0], train_batch)
+
       train_state, t_metrics, t_logs = train_step_pmapped(
           train_state, train_batch)
       # This will accumulate metrics in TPU memory up to the point that we log
@@ -497,7 +513,7 @@ def train(
       h(step)
     # Below are once-in-a-while ops -> pause.
     ###################### LOG TRAIN SUMMARY ########################
-    if ((step % log_summary_steps == 0) or (step == total_steps) or
+    if ((step % log_summary_steps == 1) or (step == total_steps) or
         (lead_host and chrono.warmup)):
       chrono.pause(wait_for=(train_metrics))
       if lead_host:
@@ -518,15 +534,19 @@ def train(
       train_metrics, extra_training_logs = [], []
       chrono.resume()
     ################### EVALUATION #######################
-    if (step % log_eval_steps == 0) or (step == total_steps):
+    if (step % log_eval_steps == 1) or (step == total_steps):
       chrono.pause(wait_for=(train_state.params))
       with report_progress.timed('eval'):
         eval_metrics = []
         # Sync model state across replicas.
-        if (use_pamp):
+        if (use_pmap):
           train_state = train_utils.sync_model_state_across_replicas(train_state)
         for _ in range(steps_per_eval):
           eval_batch = next(dataset.valid_iter)
+
+          if not use_pmap:
+            eval_batch = jax.tree_util.tree_map(lambda x: x[0], eval_batch)
+
           e_metrics, _ = eval_step_pmapped(train_state, eval_batch)
           eval_metrics.append(_get_and_reduce_metrics(e_metrics, use_pmap))
         eval_summary = train_utils.log_eval_summary(
