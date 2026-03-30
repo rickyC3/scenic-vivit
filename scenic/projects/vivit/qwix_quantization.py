@@ -286,12 +286,19 @@ def _to_host_numpy_tree(tree):
 
   def _to_host_leaf(x):
     try:
+      if isinstance(x, jax.core.Tracer):
+        return None
       if isinstance(x, jax.Array):
         return np.asarray(jax.device_get(x))
-      return x
+      if isinstance(x, np.ndarray):
+        return x
+      if isinstance(x, (str, bytes, int, float, bool, type(None))):
+        return x
+      # Ensure unknown objects are pickle-safe.
+      return repr(x)
     except Exception:
-      # Keep original leaf when conversion is not possible (e.g. tracer/object).
-      return x
+      # Keep a pickle-safe placeholder when conversion is not possible.
+      return None
 
   return jax.tree_util.tree_map(_to_host_leaf, tree)
 
@@ -431,9 +438,12 @@ def infer_single_video(video_info: Tuple, params, model_state, flax_model,
     if capture_intermediates and intermediate_dir is not None:
       safe_name = Path(video_path).stem.replace("/", "_")
       out_path = intermediate_dir / f"{safe_name}.pkl"
-      with open(out_path, 'wb') as f:
-        import pickle
-        pickle.dump(intermediates, f, protocol=pickle.HIGHEST_PROTOCOL)
+      try:
+        with open(out_path, 'wb') as f:
+          import pickle
+          pickle.dump(intermediates, f, protocol=pickle.HIGHEST_PROTOCOL)
+      except Exception as e:
+        logger.warning("保存 intermediates 失敗(%s): %s", out_path, e)
 
     #logging.info("checkpoint 3: successfully got logits from model")
 
