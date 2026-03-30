@@ -282,9 +282,18 @@ def prepare_batch(frames: np.ndarray,
 
 
 def _to_host_numpy_tree(tree):
-  """Move a pytree to host memory and convert leaves to numpy arrays."""
-  host_tree = jax.device_get(tree)
-  return jax.tree_util.tree_map(np.asarray, host_tree)
+  """Best-effort move pytree leaves to host without forcing tracer conversion."""
+
+  def _to_host_leaf(x):
+    try:
+      if isinstance(x, jax.Array):
+        return np.asarray(jax.device_get(x))
+      return x
+    except Exception:
+      # Keep original leaf when conversion is not possible (e.g. tracer/object).
+      return x
+
+  return jax.tree_util.tree_map(_to_host_leaf, tree)
 
 
 def load_vivit_model(checkpoint_path: str, config: ml_collections.ConfigDict):
@@ -344,10 +353,14 @@ def vivit_forward_pass(batch: jnp.ndarray, params, model_state, flax_model,
   try:
     variables = {'params': params, **model_state}
     if capture_intermediates:
-      logits, state = flax_model.apply(
-          variables, batch, train=False, capture_intermediates=True)
-      intermediates = _to_host_numpy_tree(state.get('intermediates', {}))
-      return logits, intermediates
+      try:
+        logits, state = flax_model.apply(
+            variables, batch, train=False, capture_intermediates=True)
+        intermediates = _to_host_numpy_tree(state.get('intermediates', {}))
+        return logits, intermediates
+      except Exception as e:
+        logger.warning("捕獲 intermediates 失敗，回退為普通推理：%s", e)
+        return flax_model.apply(variables, batch, train=False), None
     return flax_model.apply(variables, batch, train=False), None
   except Exception as e:
     logger.error(f"前向傳播失敗: {e}")
