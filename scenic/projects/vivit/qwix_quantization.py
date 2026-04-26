@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import gc
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -40,6 +40,22 @@ flags.DEFINE_enum(
     "cv2",
     ["cv2", "ffmpeg"],
     "Frame extraction backend. 'cv2' uses OpenCV seeks; 'ffmpeg' uses ffmpeg filter pipeline.",
+)
+flags.DEFINE_enum(
+    "input_dtype",
+    "float32",
+    ["float32", "float16"],
+    "Input batch dtype for inference. float16 can reduce host/GPU memory usage.",
+)
+flags.DEFINE_boolean(
+    "capture_intermediates",
+    False,
+    "Whether to capture model intermediates for each video.",
+)
+flags.DEFINE_string(
+    "intermediate_dir",
+    None,
+    "Directory to save per-video intermediates (.pkl). Required when --capture_intermediates=True.",
 )
 
 
@@ -253,10 +269,38 @@ def normalize_frames(frames: np.ndarray) -> np.ndarray:
   return (frames - mean) / std
 
 
-def prepare_batch(frames: np.ndarray, normalize: bool = True) -> jnp.ndarray:
+def prepare_batch(frames: np.ndarray,
+                  normalize: bool = True,
+                  input_dtype: str = "float32") -> jnp.ndarray:
   if normalize:
     frames = normalize_frames(frames)
+  if input_dtype == "float16":
+    frames = frames.astype(np.float16, copy=False)
+  else:
+    frames = frames.astype(np.float32, copy=False)
   return jnp.expand_dims(frames, axis=0)
+
+
+def _to_host_numpy_tree(tree):
+  """Best-effort move pytree leaves to host without forcing tracer conversion."""
+
+  def _to_host_leaf(x):
+    try:
+      if isinstance(x, jax.core.Tracer):
+        return None
+      if isinstance(x, jax.Array):
+        return np.asarray(jax.device_get(x))
+      if isinstance(x, np.ndarray):
+        return x
+      if isinstance(x, (str, bytes, int, float, bool, type(None))):
+        return x
+      # Ensure unknown objects are pickle-safe.
+      return repr(x)
+    except Exception:
+      # Keep a pickle-safe placeholder when conversion is not possible.
+      return None
+
+  return jax.tree_util.tree_map(_to_host_leaf, tree)
 
 
 def load_vivit_model(checkpoint_path: str, config: ml_collections.ConfigDict):
@@ -278,14 +322,56 @@ def load_vivit_model(checkpoint_path: str, config: ml_collections.ConfigDict):
     return None, None
 
 
+def quantize_vivit_params(flax_model, params, model_state):
+  """Apply Qwix PTQ quantization and return (quant_params, ptq_model)."""
+  del model_state
+  try:
+    params = jax.tree_util.tree_map(jnp.asarray, params)
+    dummy_input = jnp.zeros((1, 32, 224, 224, 3))
+    rng = jax.random.PRNGKey(0)
+
+    rules = [
+        qwix.QuantizationRule(
+            module_path=".*(Dense|query|key|value|out).*",
+            weight_qtype="int8",
+            act_qtype="int8",
+        )
+    ]
+
+    ptq_model = qwix.quantize_model(flax_model, qwix.PtqProvider(rules))
+
+    from functools import partial
+    init_fn = partial(ptq_model.init, train=False)
+    logging.info("正在提取量化參數結構 (使用 eval_shape)...")
+    abstract_variables = jax.eval_shape(init_fn, rng, dummy_input)
+    abs_ptq_params = abstract_variables['params']
+
+    quant_params = qwix.quantize_params(params, abs_ptq_params)
+    logging.info("✅ Qwix PTQ 流程轉換成功！")
+    return quant_params, ptq_model
+  except Exception as e:
+    logging.error(f"❌ Quantization failed, fallback to original params/model: {e}")
+    return params, flax_model
+
+
 def vivit_forward_pass(batch: jnp.ndarray, params, model_state, flax_model,
-                       deterministic: bool = True) -> Optional[jnp.ndarray]:
+                       deterministic: bool = True,
+                       capture_intermediates: bool = False):
   try:
     variables = {'params': params, **model_state}
-    return flax_model.apply(variables, batch, train=False)
+    if capture_intermediates:
+      try:
+        logits, state = flax_model.apply(
+            variables, batch, train=False, capture_intermediates=True)
+        intermediates = _to_host_numpy_tree(state.get('intermediates', {}))
+        return logits, intermediates
+      except Exception as e:
+        logger.warning("捕獲 intermediates 失敗，回退為普通推理：%s", e)
+        return flax_model.apply(variables, batch, train=False), None
+    return flax_model.apply(variables, batch, train=False), None
   except Exception as e:
     logger.error(f"前向傳播失敗: {e}")
-    return None
+    return None, None
 
 
 class VideoInferenceResult:
@@ -315,7 +401,10 @@ class VideoInferenceResult:
 
 def infer_single_video(video_info: Tuple, params, model_state, flax_model,
                        label_manager: LabelManager, num_frames: int = 32,
-                       frame_size: int = 224, extract_backend: str = 'cv2') -> VideoInferenceResult:
+                       frame_size: int = 224, extract_backend: str = 'cv2',
+                       input_dtype: str = 'float32',
+                       capture_intermediates: bool = False,
+                       intermediate_dir: Optional[Path] = None) -> VideoInferenceResult:
   video_path, start, end, label = video_info
   result = VideoInferenceResult(video_path, Path(video_path).name, label)
 
@@ -335,11 +424,26 @@ def infer_single_video(video_info: Tuple, params, model_state, flax_model,
 
     #logging.info("checkpoint 2: successfully extracted frames with %s", extract_backend)
 
-    batch = prepare_batch(frames, normalize=True)
-    logits = vivit_forward_pass(batch, params, model_state, flax_model)
+    batch = prepare_batch(frames, normalize=True, input_dtype=input_dtype)
+    logits, intermediates = vivit_forward_pass(
+        batch,
+        params,
+        model_state,
+        flax_model,
+        capture_intermediates=capture_intermediates)
     if logits is None:
       result.error_msg = "前向傳播失敗"
       return result
+
+    if capture_intermediates and intermediate_dir is not None:
+      safe_name = Path(video_path).stem.replace("/", "_")
+      out_path = intermediate_dir / f"{safe_name}.pkl"
+      try:
+        with open(out_path, 'wb') as f:
+          import pickle
+          pickle.dump(intermediates, f, protocol=pickle.HIGHEST_PROTOCOL)
+      except Exception as e:
+        logger.warning("保存 intermediates 失敗(%s): %s", out_path, e)
 
     #logging.info("checkpoint 3: successfully got logits from model")
 
@@ -357,6 +461,10 @@ def infer_single_video(video_info: Tuple, params, model_state, flax_model,
       result.top5_preds.append((label_manager.get_label(idx), float(probs[idx])))
 
     logging.info("checkpoint 5: top-5 predictions = %s", result.top5_preds)
+
+    # Explicitly release per-video tensors.
+    del frames, batch, logits, probs, top5_indices, intermediates
+    gc.collect()
 
     result.success = True
   except Exception as e:
@@ -382,27 +490,37 @@ def batch_inference(video_infos: List[Tuple], checkpoint_path: str,
   flax_model = vivit_model_lib.get_model_cls(config.model_name)(
       config, {'num_classes': config.num_classes}).flax_model
 
-  results = []
-  with ThreadPoolExecutor(max_workers=num_workers) as executor:
-    futures = {
-        executor.submit(
-            infer_single_video,
-            video_info,
-            params,
-            model_state,
-            flax_model,
-            label_manager,
-            num_frames,
-            frame_size,
-            extract_backend,
-        ): i
-        for i, video_info in enumerate(video_infos)
-    }
+  # Quantize the parameters using Qwix (fallback to original model if failed).
+  params, flax_model = quantize_vivit_params(flax_model, params, model_state)
 
-    with tqdm(total=len(video_infos), desc="推理進度") as pbar:
-      for future in as_completed(futures):
-        results.append(future.result())
-        pbar.update(1)
+  if num_workers != 1:
+    logger.warning("⚠️ 已強制使用單執行緒推理以降低記憶體壓力，忽略 --num_workers=%s。", num_workers)
+
+  results = []
+  intermediate_path = None
+  if FLAGS.capture_intermediates:
+    if not FLAGS.intermediate_dir:
+      raise ValueError("啟用 --capture_intermediates 時必須提供 --intermediate_dir")
+    intermediate_path = Path(FLAGS.intermediate_dir)
+    intermediate_path.mkdir(parents=True, exist_ok=True)
+
+  with tqdm(total=len(video_infos), desc="推理進度") as pbar:
+    for video_info in video_infos:
+      results.append(
+          infer_single_video(
+              video_info,
+              params,
+              model_state,
+              flax_model,
+              label_manager,
+              num_frames,
+              frame_size,
+              extract_backend,
+              FLAGS.input_dtype,
+              FLAGS.capture_intermediates,
+              intermediate_path,
+          ))
+      pbar.update(1)
   return results
 
 
